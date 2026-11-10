@@ -86,7 +86,7 @@ class Counter(Device):
         "polling_interval": 0.1,
     }
 
-    def __init__(self, name, parent_device, connection, edge_terminal, gate_terminal=None, sample_terminal=None, monitor=None, **kwargs):
+    def __init__(self, name, parent_device, connection, edge_terminal, gate_terminal=None, sample_terminal=None, *, monitor=None, **kwargs):
         """Counter device
 
         Args:
@@ -96,23 +96,19 @@ class Counter(Device):
             edge_terminal (str): Terminal on the parent device for edge counting. (e.g. PFI0)
             gate_terminal (str): Terminal on the parent device for gate. High for enabled. (e.g. PFI1)
             sample_terminal (str): Terminal on the parent device for accepting ticks for sampling. High at tick. (e.g. PFI2)
-            monitor (ChannelMonitor): Per-channel streaming monitors
-                (``user_devices.fanlab_devices.utils.fast_monitor``):
-                FastMonitor UDP stream and/or MetricsMonitor tags, used by
-                the parent device's BLACS worker in both manual mode and
-                buffered shots.
+            monitor: Optional ChannelMonitor for manual and buffered streaming.
             **kwargs: Passed to :func:`Device.__init__`.
         """
+        from pythonlib.online_monitor import ChannelMonitor
+        if monitor is not None and not isinstance(monitor, ChannelMonitor):
+            raise LabscriptError("Counter monitor must be a ChannelMonitor")
+        self.monitor = monitor.to_dict() if monitor is not None else None
         self.acquisitions = []
         self.edge_terminal = edge_terminal
         self.gate_terminal = gate_terminal
         self.sample_terminal = sample_terminal
-        if monitor is not None and not hasattr(monitor, "to_dict"):
-            raise TypeError(
-                "Counter monitor must be a fast_monitor.ChannelMonitor"
-            )
-        self.monitor = monitor
         Device.__init__(self, name, parent_device, connection, **kwargs)
+        self.set_property("monitor", self.monitor, "connection_table_properties")
 
     def acquire(self, label, max_sampling_rate=None, buffer_size=None, polling_interval=None):
         """Schedule a counter acquisition
@@ -143,21 +139,22 @@ class Counter(Device):
         rate=10.0,
         buffer_size=1024,
         polling_interval=0.1,
+        **legacy,
     ):
-        """Configure BLACS manual-mode counter acquisition.
+        """Configure manual acquisition timing; sinks belong in Counter(monitor=...).
 
-        Streaming, scaling and averaging are not configured here: samples are
-        streamed raw through the Counter's ``monitor`` (ChannelMonitor)
-        argument and any maths is the receiver's business.
-
-        Args:
-            enabled (bool): Whether BLACS should show manual controls for this counter.
-            sample_clock (str): ``"connection_table"`` or a counter such as ``"ctr1"``
-                to use as a manual-mode counter-output sample clock.
-            rate (float): Output counter sample clock rate in Hz.
-            buffer_size (int): Length of the NI-DAQmx read buffer.
-            polling_interval (float): Interval in seconds for BLACS to fetch data.
+        ``sample_clock`` is ``connection_table`` for an external sample terminal,
+        or ``ctr<N>`` to generate a sample clock at ``rate`` Hz. ``buffer_size``
+        sets the read buffer length; ``polling_interval`` is the read interval in
+        seconds (overridden by FastMonitor.poll_s when configured, minimum 20 ms).
+        ``enabled=False`` hides the channel's manual controls.
         """
+        if legacy:
+            raise LabscriptError(
+                "Legacy manual counter settings are unsupported: %s. "
+                "Use Counter(monitor=ChannelMonitor(...)); apply averaging and "
+                "multiplication at the receiver." % ", ".join(sorted(legacy))
+            )
         sample_clock = str(sample_clock).strip()
         sample_clock_lower = sample_clock.lower()
         if sample_clock_lower == "connection_table":
@@ -187,8 +184,7 @@ class Counter(Device):
             polling_interval = float(polling_interval)
         except (TypeError, ValueError):
             raise LabscriptError(
-                "Counter manual acquisition rate and polling_interval must "
-                "be numeric"
+                "Counter manual acquisition rate and polling_interval must be numeric"
             )
         if not math.isfinite(rate) or rate <= 0:
             raise LabscriptError(
@@ -198,17 +194,12 @@ class Counter(Device):
             raise LabscriptError(
                 "Counter manual acquisition polling_interval must be at least 0.02 s"
             )
-
         try:
             buffer_size = int(buffer_size)
         except (TypeError, ValueError):
-            raise LabscriptError(
-                "Counter manual acquisition buffer_size must be an integer"
-            )
+            raise LabscriptError("Counter buffer_size must be an integer")
         if buffer_size < 1:
-            raise LabscriptError(
-                "Counter manual acquisition buffer_size must be at least 1"
-            )
+            raise LabscriptError("Counter buffer_size must be at least 1")
 
         config = {
             "enabled": bool(enabled),
